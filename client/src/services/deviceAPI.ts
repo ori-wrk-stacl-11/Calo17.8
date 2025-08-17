@@ -3,6 +3,7 @@ import { deviceConnectionService } from "./deviceConnections";
 import { nutritionAPI } from "./api";
 import axios from "axios";
 import { Platform } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export interface ConnectedDevice {
   id: string;
@@ -50,7 +51,9 @@ class DeviceAPIService {
 
       // First check server for connected devices
       try {
-        const response = await deviceAxios.get("/devices");
+        const response = await deviceAxios.get("/devices", {
+          headers: await this.getAuthHeaders(),
+        });
         if (response.data.success) {
           const serverDevices = response.data.data.map((device: any) => ({
             id: device.connected_device_id,
@@ -74,6 +77,17 @@ class DeviceAPIService {
       // Fallback to local device checking
       const devices: ConnectedDevice[] = [];
 
+      // Check for locally stored device connections
+      try {
+        const localDevices = await AsyncStorage.getItem("connected_devices");
+        if (localDevices) {
+          const parsed = JSON.parse(localDevices);
+          devices.push(...parsed);
+        }
+      } catch (error) {
+        console.warn("⚠️ Error loading local devices:", error);
+      }
+
       return devices;
     } catch (error) {
       console.error("💥 Error getting connected devices:", error);
@@ -93,6 +107,18 @@ class DeviceAPIService {
             await deviceAxios.post("/devices/connect", {
               deviceType: "APPLE_HEALTH",
               deviceName: "Apple Health",
+            }, {
+              headers: await this.getAuthHeaders(),
+            });
+
+            // Store locally
+            await this.storeLocalDevice({
+              id: "apple_health",
+              name: "Apple Health",
+              type: "APPLE_HEALTH",
+              status: "CONNECTED",
+              lastSync: new Date().toISOString(),
+              isPrimary: true,
             });
           } catch (serverError) {
             console.warn("⚠️ Failed to register with server:", serverError);
@@ -116,6 +142,18 @@ class DeviceAPIService {
               result.deviceData?.displayName || `${deviceType} Device`,
             accessToken: result.accessToken,
             refreshToken: result.refreshToken,
+          }, {
+            headers: await this.getAuthHeaders(),
+          });
+
+          // Store locally
+          await this.storeLocalDevice({
+            id: `${deviceType.toLowerCase()}_${Date.now()}`,
+            name: result.deviceData?.displayName || `${deviceType} Device`,
+            type: deviceType as any,
+            status: "CONNECTED",
+            lastSync: new Date().toISOString(),
+            isPrimary: false,
           });
         } catch (serverError) {
           console.warn("⚠️ Failed to register with server:", serverError);
@@ -138,29 +176,7 @@ class DeviceAPIService {
       console.log("🔄 Syncing device:", deviceId);
 
       if (deviceId === "apple_health") {
-        // Get today's health data
-        const today = new Date().toISOString().split("T")[0];
-        const healthData = await healthKitService.getHealthDataForDate(today);
-
-        // Send to server
-        try {
-          await deviceAxios.post(`/devices/${deviceId}/sync`, {
-            activityData: {
-              steps: healthData.steps,
-              caloriesBurned: healthData.caloriesBurned,
-              activeMinutes: healthData.activeMinutes,
-              bmr: 1800, // Default BMR estimate
-              heartRate: healthData.heartRate,
-              weight: healthData.weight,
-              distance: healthData.distance,
-            },
-          });
-        } catch (serverError) {
-          console.warn("⚠️ Failed to sync with server:", serverError);
-        }
-
-        console.log("📊 Synced Apple Health data:", healthData);
-        return true;
+        return await healthKitService.syncWithServer("user_id", deviceId);
       }
 
       // For other devices, fetch data using their APIs
@@ -216,6 +232,12 @@ class DeviceAPIService {
             today
           );
           break;
+        case "SAMSUNG_HEALTH":
+          activityData = await deviceConnectionService.fetchSamsungHealthData(
+            tokens.accessToken,
+            today
+          );
+          break;
         default:
           console.error("❌ Unsupported device type:", device.type);
           return false;
@@ -233,6 +255,8 @@ class DeviceAPIService {
               distance: activityData.distance,
               heartRate: activityData.heartRate,
             },
+          }, {
+            headers: await this.getAuthHeaders(),
           });
         } catch (serverError) {
           console.warn("⚠️ Failed to sync with server:", serverError);
@@ -257,7 +281,9 @@ class DeviceAPIService {
       try {
         const response = await deviceAxios.get(
           `/devices/activity/${date}/${date}`
-        );
+        , {
+          headers: await this.getAuthHeaders(),
+        });
         if (response.data.success && response.data.data.length > 0) {
           const serverData = response.data.data[0];
           return {
@@ -311,6 +337,11 @@ class DeviceAPIService {
                   tokens.accessToken,
                   date
                 );
+              case "SAMSUNG_HEALTH":
+                return await deviceConnectionService.fetchSamsungHealthData(
+                  tokens.accessToken,
+                  date
+                );
             }
           }
         }
@@ -330,7 +361,9 @@ class DeviceAPIService {
 
       // Try server first
       try {
-        const response = await deviceAxios.get(`/devices/balance/${date}`);
+        const response = await deviceAxios.get(`/devices/balance/${date}`, {
+          headers: await this.getAuthHeaders(),
+        });
         if (response.data.success) {
           console.log("✅ Daily balance from server:", response.data.data);
           return response.data.data;
@@ -398,11 +431,16 @@ class DeviceAPIService {
       if (device) {
         // Clear local tokens
         await deviceConnectionService.clearDeviceTokens(device.type);
+        
+        // Remove from local storage
+        await this.removeLocalDevice(deviceId);
       }
 
       // Disconnect from server
       try {
-        await deviceAxios.delete(`/devices/${deviceId}`);
+        await deviceAxios.delete(`/devices/${deviceId}`, {
+          headers: await this.getAuthHeaders(),
+        });
       } catch (serverError) {
         console.warn("⚠️ Failed to disconnect from server:", serverError);
       }
@@ -415,6 +453,41 @@ class DeviceAPIService {
     }
   }
 
+  private async getAuthHeaders() {
+    try {
+      const { authAPI } = await import("./api");
+      const token = await authAPI.getStoredToken();
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    } catch (error) {
+      console.warn("⚠️ Failed to get auth headers:", error);
+      return {};
+    }
+  }
+
+  private async storeLocalDevice(device: ConnectedDevice) {
+    try {
+      const devices = await this.getConnectedDevices();
+      const updatedDevices = devices.filter(d => d.id !== device.id);
+      updatedDevices.push(device);
+      
+      await AsyncStorage.setItem("connected_devices", JSON.stringify(updatedDevices));
+      console.log("💾 Device stored locally:", device.name);
+    } catch (error) {
+      console.error("💥 Error storing device locally:", error);
+    }
+  }
+
+  private async removeLocalDevice(deviceId: string) {
+    try {
+      const devices = await this.getConnectedDevices();
+      const updatedDevices = devices.filter(d => d.id !== deviceId);
+      
+      await AsyncStorage.setItem("connected_devices", JSON.stringify(updatedDevices));
+      console.log("🗑️ Device removed locally:", deviceId);
+    } catch (error) {
+      console.error("💥 Error removing device locally:", error);
+    }
+  }
   // BATCH SYNC ALL DEVICES
   async syncAllDevices(): Promise<{ success: number; failed: number }> {
     try {

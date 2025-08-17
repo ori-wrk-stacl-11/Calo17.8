@@ -28,6 +28,9 @@ export const queryKeys = {
   tooltips: ["tooltips"] as const,
   statistics: (timeRange: string, start?: string, end?: string) =>
     ["statistics", timeRange, start, end] as const,
+  devices: ["devices"] as const,
+  deviceActivity: (deviceId: string, date: string) => ["deviceActivity", deviceId, date] as const,
+  deviceAnalytics: (deviceId: string, days: number) => ["deviceAnalytics", deviceId, days] as const,
 } as const;
 
 // Tooltip hooks

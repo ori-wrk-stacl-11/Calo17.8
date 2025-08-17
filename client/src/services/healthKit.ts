@@ -4,6 +4,7 @@ import AppleHealthKit, {
 } from "react-native-health";
 import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { api } from "./api";
 
 const permissions: HealthKitPermissions = {
   permissions: {
@@ -27,10 +28,27 @@ export interface HealthData {
   heartRate: number;
   distance: number;
   activeMinutes: number;
-  date: Date;
+  date: string;
+  weight?: number;
 }
 
 export class HealthKitService {
+  static async requestPermissions(): Promise<boolean> {
+    try {
+      if (Platform.OS !== "ios") {
+        console.log("HealthKit is only available on iOS");
+        return false;
+      }
+
+      await this.initHealthKit();
+      console.log("✅ HealthKit permissions granted");
+      return true;
+    } catch (error) {
+      console.error("💥 HealthKit permissions error:", error);
+      return false;
+    }
+  }
+
   static initHealthKit(): Promise<void> {
     return new Promise((resolve, reject) => {
       if (Platform.OS !== "ios") {
@@ -46,6 +64,30 @@ export class HealthKitService {
         }
       });
     });
+  }
+
+  static async getHealthDataForDate(date: string): Promise<HealthData | null> {
+    try {
+      if (Platform.OS !== "ios") {
+        return null;
+      }
+
+      const targetDate = new Date(date);
+      const healthData = await this.getDailyHealthData(targetDate);
+      
+      return {
+        steps: healthData.steps,
+        caloriesBurned: healthData.caloriesBurned,
+        heartRate: healthData.heartRate,
+        distance: healthData.distance,
+        activeMinutes: healthData.activeMinutes,
+        date: date,
+        weight: healthData.weight,
+      };
+    } catch (error) {
+      console.error("💥 Error getting health data for date:", error);
+      return null;
+    }
   }
 
   static async getDailyHealthData(
@@ -68,6 +110,7 @@ export class HealthKitService {
         this.getActiveCalories(options),
         this.getHeartRate(options),
         this.getDistance(options),
+        this.getWeight(options),
       ]);
 
       const healthData: HealthData = {
@@ -76,7 +119,8 @@ export class HealthKitService {
         heartRate: heartRate || 0,
         distance: distance || 0,
         activeMinutes: Math.floor((steps || 0) / 100), // Estimate active minutes
-        date: date,
+        date: date.toISOString().split('T')[0],
+        weight: weight || undefined,
       };
 
       // Cache the data
@@ -90,6 +134,43 @@ export class HealthKitService {
         (await this.getCachedHealthData(date)) ||
         this.getDefaultHealthData(date)
       );
+    }
+  }
+
+  static async syncWithServer(userId: string, deviceId: string): Promise<boolean> {
+    try {
+      console.log("🔄 Syncing HealthKit data with server...");
+      
+      const today = new Date().toISOString().split('T')[0];
+      const healthData = await this.getHealthDataForDate(today);
+      
+      if (!healthData) {
+        console.log("⚠️ No health data available to sync");
+        return false;
+      }
+
+      // Send to server
+      const response = await api.post(`/devices/${deviceId}/sync`, {
+        activityData: {
+          steps: healthData.steps,
+          caloriesBurned: healthData.caloriesBurned,
+          activeMinutes: healthData.activeMinutes,
+          heartRate: healthData.heartRate,
+          weight: healthData.weight,
+          distance: healthData.distance,
+          bmr: 1800, // Default BMR estimate
+        },
+      });
+
+      if (response.data.success) {
+        console.log("✅ HealthKit data synced successfully");
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      console.error("💥 Error syncing HealthKit data:", error);
+      return false;
     }
   }
 
@@ -122,7 +203,7 @@ export class HealthKitService {
       heartRate: 0,
       distance: 0,
       activeMinutes: 0,
-      date: date,
+      date: date.toISOString().split('T')[0],
     };
   }
 
@@ -231,6 +312,21 @@ export class HealthKitService {
     });
   }
 
+  private static getWeight(options: HealthInputOptions): Promise<number> {
+    return new Promise((resolve, reject) => {
+      AppleHealthKit.getLatestWeight(
+        options,
+        (callbackError: string, results: any) => {
+          if (callbackError) {
+            resolve(0); // Don't reject for weight, just return 0
+          } else {
+            resolve(results?.value || 0);
+          }
+        }
+      );
+    });
+  }
+
   static async syncWithAI(apiUrl: string, userId: string): Promise<string> {
     try {
       const healthData = await this.getDailyHealthData();
@@ -262,3 +358,5 @@ export class HealthKitService {
     }
   }
 }
+
+export const healthKitService = new HealthKitService();

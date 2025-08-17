@@ -181,19 +181,6 @@ export default function DevicesScreen() {
       return;
     }
 
-    // Special check for Google Fit configuration
-    if (deviceType === "GOOGLE_FIT") {
-      const clientSecret = process.env.EXPO_PUBLIC_GOOGLE_FIT_CLIENT_SECRET;
-      if (!clientSecret) {
-        Alert.alert(
-          "Configuration Required",
-          "Google Fit client secret is not configured. Please add EXPO_PUBLIC_GOOGLE_FIT_CLIENT_SECRET to your environment variables and restart the app.",
-          [{ text: "OK" }]
-        );
-        return;
-      }
-    }
-
     console.log("✅ About to show connection alert for:", deviceInfo.name);
 
     Alert.alert(
@@ -219,9 +206,17 @@ export default function DevicesScreen() {
               if (success) {
                 Alert.alert(
                   "Success",
-                  `${deviceInfo.name} connected successfully! You can now sync your health data.`
+                  `${deviceInfo.name} connected successfully! Initial sync is in progress.`,
+                  [
+                    {
+                      text: "OK",
+                      onPress: () => {
+                        // Refresh data after connection
+                        loadDeviceData();
+                      },
+                    },
+                  ]
                 );
-                await loadDeviceData(); // Refresh data
               } else {
                 Alert.alert(
                   "Connection Failed",
@@ -284,8 +279,19 @@ export default function DevicesScreen() {
       const success = await deviceAPI.syncDevice(deviceId);
 
       if (success) {
-        Alert.alert("Success", "Device synced successfully!");
-        await loadDeviceData(); // Refresh data
+        Alert.alert(
+          "Success", 
+          "Device synced successfully! Your latest activity data has been updated.",
+          [
+            {
+              text: "OK",
+              onPress: () => {
+                // Refresh data after sync
+                loadDeviceData();
+              },
+            },
+          ]
+        );
       } else {
         Alert.alert(
           "Error",
@@ -310,6 +316,8 @@ export default function DevicesScreen() {
       return;
     }
 
+    setRefreshing(true);
+
     try {
       const result = await deviceAPI.syncAllDevices();
 
@@ -318,9 +326,17 @@ export default function DevicesScreen() {
           "Sync Complete",
           `Successfully synced ${result.success} device(s)${
             result.failed > 0 ? `, ${result.failed} failed` : ""
-          }`
+          }`,
+          [
+            {
+              text: "OK",
+              onPress: () => {
+                // Refresh data after sync all
+                loadDeviceData();
+              },
+            },
+          ]
         );
-        await loadDeviceData(); // Refresh data
       } else {
         Alert.alert(
           "Sync Failed",
@@ -330,6 +346,8 @@ export default function DevicesScreen() {
     } catch (error) {
       console.error("💥 Sync all error:", error);
       Alert.alert("Error", "Failed to sync devices");
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -626,6 +644,15 @@ export default function DevicesScreen() {
                   <Text style={styles.activityLabel}>Avg Heart Rate</Text>
                 </View>
               )}
+              {activityData.distance && (
+                <View style={styles.activityCard}>
+                  <Ionicons name="location" size={24} color="#9C27B0" />
+                  <Text style={styles.activityValue}>
+                    {activityData.distance.toFixed(1)}
+                  </Text>
+                  <Text style={styles.activityLabel}>Distance (km)</Text>
+                </View>
+              )}
             </View>
           </View>
         )}
@@ -640,9 +667,16 @@ export default function DevicesScreen() {
             <TouchableOpacity
               style={styles.syncAllButton}
               onPress={handleSyncAllDevices}
+              disabled={refreshing}
             >
-              <Ionicons name="refresh-circle" size={24} color="white" />
-              <Text style={styles.syncAllButtonText}>Sync All Devices</Text>
+              {refreshing ? (
+                <ActivityIndicator size="small" color="white" />
+              ) : (
+                <Ionicons name="refresh-circle" size={24} color="white" />
+              )}
+              <Text style={styles.syncAllButtonText}>
+                {refreshing ? "Syncing..." : "Sync All Devices"}
+              </Text>
             </TouchableOpacity>
           </View>
         )}
@@ -678,7 +712,17 @@ export default function DevicesScreen() {
             data integration
           </Text>
           <Text style={styles.helpText}>
+            • <Text style={styles.bold}>Samsung Health:</Text> Available on Samsung
+            devices for comprehensive health tracking
+          </Text>
+          <Text style={styles.helpText}>
             • Your health data is processed securely and stored with encryption
+          </Text>
+          <Text style={styles.helpText}>
+            • Data syncs automatically every 24 hours, or manually anytime
+          </Text>
+          <Text style={styles.helpText}>
+            • All data is stored locally and on secure servers with end-to-end encryption
           </Text>
         </View>
       </ScrollView>
